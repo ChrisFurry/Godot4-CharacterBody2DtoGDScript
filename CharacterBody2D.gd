@@ -45,6 +45,18 @@ const FLOOR_ANGLE_THRESHOLD = 0.01;
 # Taken from the math macro's file
 const CMP_EPSILON = 0.00001;
 
+func _notification(what)->void:
+	match(what):
+		NOTIFICATION_ENTER_TREE:
+			# Reset move_and_slide() data.
+			on_floor = false;
+			platform_rid = RID();
+			platform_object_id = -1;
+			on_ceiling = false;
+			on_wall = false;
+			motion_results.clear();
+			platform_velocity = Vector2();
+
 func move_and_slide()->bool:
 	var delta:float = get_physics_process_delta_time() if(Engine.is_in_physics_frame())else get_process_delta_time();
 	
@@ -360,5 +372,41 @@ func get_last_slide_collision()->KinematicCollision2D:
 	if(motion_results.size() == 0): return KinematicCollision2D.new();
 	return get_slide_collision(motion_results.size() - 1);
 
-func set_safe_margin(margin:float)->void: safe_margin = margin;
 func get_safe_margin()->float: return safe_margin;
+func set_safe_margin(margin:float)->void: safe_margin = margin;
+
+func is_floor_stop_on_slope_enabled()->bool: return floor_stop_on_slope;
+func set_floor_stop_on_slope_enabled(enabled:bool)->void: floor_stop_on_slope = enabled;
+
+func is_floor_block_on_wall_enabled()->bool: return floor_block_on_wall;
+func set_floor_block_on_wall_enabled(enabled:bool)->void: floor_block_on_wall = enabled;
+
+func is_sliding_on_ceiling_enabled()->bool: return slide_on_ceiling;
+func set_sliding_on_ceiling_enabled(enabled:bool)->void: slide_on_ceiling = enabled;
+
+func get_platform_floor_layers()->int: return platform_floor_layers;
+func set_platform_floor_layers(exclude_layers:int)->void: platform_floor_layers = exclude_layers;
+
+func get_platform_wall_layers()->int: return platform_wall_layers;
+func set_platform_wall_layers(exclude_layers:int)->void: platform_wall_layers = exclude_layers;
+
+func get_motion_mode()->int: return motion_mode;
+func set_motion_mode(mode:MotionMode)->void: motion_mode = mode;
+
+func get_platform_on_leave()->int: return platform_on_leave;
+func set_platform_on_leave(on_leave_apply_velocity:PlatformOnLeave)->void: platform_on_leave = on_leave_apply_velocity;
+
+func get_max_slides()->int: return max_slides;
+func set_max_slides(max_slides:int)->void: self.max_slides = max(max_slides,1);
+
+func get_floor_max_angle()->float: return floor_max_angle;
+func set_floor_max_angle(radians:float)->void: floor_max_angle = radians;
+
+func get_floor_snap_length()->float: return floor_snap_length;
+func set_floor_snap_length(snap_length:float)->void: floor_snap_length = snap_length;
+
+func get_wall_min_slide_angle()->float: return wall_min_slide_angle;
+func set_wall_min_slide_angle(radians:float)->void: wall_min_slide_angle = radians;
+
+func get_up_direction()->Vector2: return up_direction;
+func set_up_direction(direction:Vector2)->void: up_direction = direction;
