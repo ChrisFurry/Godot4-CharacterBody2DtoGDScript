@@ -1,3 +1,6 @@
+## Little warning
+I realized now i botched it somewhere and gotta reconvert it with my new knowledge but I don't know when I will be able to get to that.
+
 # Godot4-CharacterBody2DtoGDScript
  A conversion of the CharacterBody2D C++ code to GDScript for whatever you want.
 
