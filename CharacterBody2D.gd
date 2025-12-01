@@ -1,412 +1,468 @@
-# For now it inherits CharacterBody2D, since inheriting PhysicsBody2D causes it to not be usable.
-extends CharacterBody2D;
-# If you can find a way to inherit PhysicsBody2D then uncomment the variable/constant definitions below.
+# We can't extend PhysicsBody2D, and AnimatableBody2D does not already define variables we need.
+extends AnimatableBody2D
 
-#var floor_block_on_wall:bool = true;
-#var floor_constant_speed:bool = false;
-#var floor_max_angle:float = 0.785398;
-#var floor_snap_length:float = 1.0;
-#var floor_stop_on_slope:bool = true;
-#var max_slides:int = 4;
-#var motion_mode:MotionMode = 0;
-#var platform_floor_layers:int = 4294967295;
-#var platform_on_leave:PlatformOnLeave = 0;
-#var platform_wall_layers:int = 0;
-#var safe_margin:float = 0.08;
-#var slide_on_ceiling:bool = true;
-#var up_direction:Vector2 = Vector2(0,-1);
-#var velocity:Vector2 = Vector2(0,0);
-#var wall_min_slide_angle:float = 0.261799;
+@export var motion_mode:CharacterBody2D.MotionMode = CharacterBody2D.MotionMode.MOTION_MODE_GROUNDED
+@export var up_direction:Vector2	= Vector2.UP:
+	set(value): set_up_direction(value)
+@export var slide_on_ceiling:bool = true
+@export var wall_min_slide_angle:float = deg_to_rad(15.0)
 
-# Internal Collision Variables
-var previous_position:Vector2 = Vector2();
+@export_group("Floor","floor_")
 
-var real_velocity:Vector2 = Vector2();
+@export var floor_constant_speed:bool = false:
+	set(value): set_floor_constant_speed_enabled(value)
+@export var floor_stop_on_slope:bool = true:
+	set(value): set_floor_stop_on_slope_enabled(value)
+@export var floor_block_on_wall:bool = true:
+	set(value): set_floor_block_on_wall_enabled(value)
 
-var platform_velocity:Vector2 = Vector2();
-var platform_rid:RID = RID();
-var platform_layer:int;
+@export var floor_max_angle:float	= deg_to_rad(45.0)
+@export var floor_snap_length:float = 8.0:
+	set(value): set_floor_snap_length(value)
 
-var platform_object_id:int;
+@export_group("Moving Platform","platform_")
 
-var motion_results:Array;
-var last_motion:Vector2 = Vector2();
+@export var platform_on_leave:CharacterBody2D.PlatformOnLeave = CharacterBody2D.PlatformOnLeave.PLATFORM_ON_LEAVE_ADD_VELOCITY
+@export_flags_2d_physics var platform_floor_layers:int = (1 << 32) # UINT32_MAX
+@export_flags_2d_physics var platform_wall_layers = 0
 
-var on_floor:bool = false;
-var floor_normal:Vector2 = Vector2();
+@export_group("Collision")
 
-var on_wall:bool = false;
-var wall_normal:Vector2 = Vector2();
+@export var safe_margin:float = 0.08
 
-var on_ceiling:bool = false;
+var max_slides:int = 4:
+	set(value): set_max_slides(value)
+var platform_layer:int = 0
 
-# So, if you pass 45 as limit, avoid numerical precision errors when angle is 45.
-const FLOOR_ANGLE_THRESHOLD = 0.01;
-# Taken from the math macro's file
-const CMP_EPSILON = 0.00001;
+var velocity:Vector2 = Vector2.ZERO
 
-func _notification(what)->void:
+var floor_normal:Vector2
+var platform_velocity:Vector2
+var wall_normal:Vector2
+var last_motion:Vector2
+var previous_position:Vector2
+var real_velocity:Vector2
+
+var platform:Node
+var platform_rid:RID
+
+var on_floor:bool = false
+var on_ceiling:bool = false
+var on_wall:bool = false
+
+var motion_results:Array[KinematicCollision2D]
+var slide_colliders:Array[KinematicCollision2D]
+
+# Constants
+
+const FLOOR_ANGLE_THRESHOLD = 0.01
+
+const CMP_EPSILON = 0.001
+
+# Base Functions
+# NOTE: These are what you want.
+
+func _notification(what:int)->void:
 	match(what):
 		NOTIFICATION_ENTER_TREE:
-			# Reset move_and_slide() data.
-			on_floor = false;
-			platform_rid = RID();
-			platform_object_id = -1;
-			on_ceiling = false;
-			on_wall = false;
-			motion_results.clear();
-			platform_velocity = Vector2();
+			on_floor = false
+			platform_rid = RID()
+			platform = null
+			on_ceiling = false
+			on_wall = false
+			motion_results.clear()
+			platform_velocity = Vector2()
 
 func move_and_slide()->bool:
-	var delta:float = get_physics_process_delta_time() if(Engine.is_in_physics_frame())else get_process_delta_time();
+	var delta:float = get_physics_process_delta_time() if(Engine.is_in_physics_frame())else get_process_delta_time()
 	
-	var current_platform_velocity:Vector2 = get_platform_velocity();
-	var gt:Transform2D = get_global_transform();
-	previous_position = gt.get_origin();
-	
-	if((on_floor || on_wall) && platform_rid.is_valid()):
-		var excluded:bool = false;
+	var current_platform_velocity:Vector2 = platform_velocity
+	var previous_transform:Transform2D = global_transform
+	previous_position = previous_transform.get_origin()
+	# Platform Movement
+	if((on_floor or on_wall) and platform_rid.is_valid()):
+		var excluded:bool = false
 		if(on_floor):
-			excluded = (platform_floor_layers & platform_layer) == 0;
-		if(on_wall):
-			excluded = (platform_wall_layers & platform_layer) == 0;
-		if(!excluded):
-			var bs:PhysicsDirectBodyState2D = PhysicsServer2D.body_get_direct_state(platform_rid);
-			if(bs):
-				var local_position:Vector2 = previous_position - bs.get_transform().get_origin();
-				current_platform_velocity = bs.get_velocity_at_local_position(local_position);
+			excluded = (platform_floor_layers & platform_layer) == 0
+		elif(on_wall):
+			excluded = (platform_wall_layers & platform_layer) == 0
+		if(not excluded):
+			var body_state:PhysicsDirectBodyState2D = PhysicsServer2D.body_get_direct_state(platform_rid)
+			if(body_state):
+				var local_position = previous_transform.get_origin() - body_state.transform.get_origin()
+				current_platform_velocity = body_state.get_velocity_at_local_position(local_position)
 			else:
-				current_platform_velocity = Vector2();
-				platform_rid = RID();
+				current_platform_velocity = Vector2()
+				platform_rid = RID()
+				platform = null
 		else:
-			current_platform_velocity = Vector2();
+			current_platform_velocity = Vector2()
+	motion_results.clear()
+	last_motion = Vector2()
 	
-	motion_results.clear();
-	last_motion = Vector2();
+	var was_on_floor:bool = on_floor
+	on_floor = false
+	on_ceiling = false
+	on_wall = false
 	
-	var was_on_floor:bool = on_floor;
-	on_floor = false;
-	on_wall = false;
-	on_ceiling = false;
+	if(not current_platform_velocity.is_zero_approx()):
+		if(platform_rid.is_valid()):
+			add_collision_exception_with(platform)
+			var result = move_and_collide(current_platform_velocity * delta,false,safe_margin,true)
+			if(result):
+				motion_results.push_back(result)
+				_set_collision_direction(result)
+			remove_collision_exception_with(platform)
 	
-	if(!current_platform_velocity.is_zero_approx()):
-		var floor_result:KinematicCollision2D = move_and_collide(current_platform_velocity * delta,false,safe_margin,true);
-		if(floor_result is KinematicCollision2D):
-			motion_results.push_back(floor_result);
-			_set_collision_direction(floor_result);
-	# Motion Mode
-	if(motion_mode == MOTION_MODE_GROUNDED):
-		_move_and_slide_grounded(delta,was_on_floor);
+	if(motion_mode == CharacterBody2D.MotionMode.MOTION_MODE_GROUNDED):
+		_move_and_slide_grounded(delta,was_on_floor)
 	else:
-		_move_and_slide_floating(delta);
-	# Compute real velocity
-	real_velocity = get_position_delta() / delta;
+		_move_and_slide_floating(delta)
 	
-	if(platform_on_leave != PLATFORM_ON_LEAVE_DO_NOTHING):
-		# Add last platform velocity when just left a moving platform.
-		if(!on_floor && !on_wall):
-			if(platform_on_leave == PLATFORM_ON_LEAVE_ADD_UPWARD_VELOCITY && current_platform_velocity.dot(up_direction) < 0):
-				current_platform_velocity = current_platform_velocity.slide(up_direction);
-			velocity += current_platform_velocity;
+	real_velocity = get_position_delta() / delta
 	
-	return motion_results.size() > 0;
+	if(platform_on_leave != CharacterBody2D.PlatformOnLeave.PLATFORM_ON_LEAVE_DO_NOTHING):
+		if(not on_floor and not on_wall):
+			if(platform_on_leave == CharacterBody2D.PlatformOnLeave.PLATFORM_ON_LEAVE_ADD_UPWARD_VELOCITY and current_platform_velocity.dot(up_direction) < 0.0):
+				current_platform_velocity = current_platform_velocity.slide(up_direction)
+			velocity += current_platform_velocity
+	
+	return motion_results.size() > 0
 
 func _move_and_slide_grounded(delta:float,was_on_floor:bool)->void:
-	var motion:Vector2 = velocity * delta;
-	var motion_slide_up = motion.slide(up_direction);
+	var motion:Vector2 = velocity * delta
+	var motion_slide_up:Vector2 = motion.slide(up_direction)
 	
-	var prev_floor_normal = floor_normal;
+	var prev_floor_normal:Vector2 = floor_normal
 	
-	platform_rid = RID();
-	platform_object_id = -1;
-	floor_normal = Vector2();
-	platform_velocity = Vector2();
+	platform_rid = RID()
+	platform = null
+	floor_normal = Vector2()
+	platform_velocity = Vector2()
 	
-	# No sliding on first attempt to keep floor motion stable when possible,
-	# When stop on slope is enabled or when there is no up direction.
-	var sliding_enabled:bool = !floor_stop_on_slope;
-	# Constant speed can be applied only the first time sliding is enabled.
-	var can_apply_constant_speed:bool = sliding_enabled;
-	#  If the platform's ceiling push down the body.
-	var apply_ceiling_velocity:bool = false;
-	var first_slide:bool = true;
-	var vel_dir_facing_up:bool = velocity.dot(up_direction) > 0;
-	var last_travel:Vector2;
+	var sliding_enabled:bool = not floor_stop_on_slope
+	var can_apply_constant_speed:bool = sliding_enabled
+	var apply_ceiling_velocity:bool = false
+	var first_slide:bool = true
+	var vel_dir_facing_up:bool = velocity.dot(up_direction) > 0
+	var last_travel:Vector2
 	
 	for i in max_slides:
-		var prev_position:Vector2 = get_global_transform().origin;
-		
-		var result:KinematicCollision2D = move_and_collide(motion,false,safe_margin,true);
-		var collided:bool = (result is KinematicCollision2D);
-		
-		last_motion = result.get_travel() if(collided)else motion;
-		
+		var prev_position:Vector2 = global_transform.origin
+		var result:KinematicCollision2D = _move_and_collide_cancel_sliding(motion,false,safe_margin,true,not sliding_enabled)
+		var collided:bool = result != null
 		if(collided):
-			motion_results.push_back(result);
-			_set_collision_direction(result);
+			last_motion = result.get_travel()
 			
-			# If we hit a ceiling platform, we set the vertical velocity to at least the platform one.
-			if(on_ceiling && result.get_collider_velocity() != Vector2() && result.get_collider_velocity().dot(up_direction) < 0):
-				# If ceiling sliding is on, only apply when the ceiling is flat or when the motion is upward.
-				if(!slide_on_ceiling || motion.dot(up_direction) < 0 || (result.get_normal() + up_direction).length() < 0.01):
-					apply_ceiling_velocity = true;
-					var ceiling_vertical_velocity:Vector2 = up_direction * up_direction.dot(result.get_collider_velocity());
-					var motion_vertical_velocity:Vector2 = up_direction * up_direction.dot(velocity);
-					if(motion_vertical_velocity.dot(up_direction) > 0 || ceiling_vertical_velocity.length_squared() > motion_vertical_velocity.length_squared()):
-						velocity = ceiling_vertical_velocity + velocity.slide(up_direction);
+			motion_results.push_back(result)
+			_set_collision_direction(result)
 			
-			if(on_floor && floor_stop_on_slope && (velocity.normalized() + up_direction).length() < 0.01):
-				var gt:Transform2D = get_global_transform();
+			if(on_ceiling and not result.get_collider_velocity().is_zero_approx() and result.get_collider_velocity().dot(up_direction) < 0.0):
+				if(not slide_on_ceiling or motion.dot(up_direction) < 0.0 or (result.get_normal() + up_direction).length() < 0.01):
+					apply_ceiling_velocity = true
+					var ceiling_vert_velocity:Vector2 = up_direction * up_direction.dot(result.get_collider_velocity())
+					var motion_vert_velocity:Vector2 = up_direction * up_direction.dot(velocity)
+					if(motion_vert_velocity.dot(up_direction) > 0.0 or ceiling_vert_velocity.length_squared() > motion_vert_velocity.length_squared()):
+						velocity = ceiling_vert_velocity + velocity.slide(up_direction)
+			
+			if(on_floor and floor_stop_on_slope and (velocity.normalized() + up_direction).length() < 0.01):
 				if(result.get_travel().length() <= safe_margin + CMP_EPSILON):
-					gt = gt.translated(-result.get_travel());
-				set_global_transform(gt);
-				velocity = Vector2();
-				last_motion = Vector2();
-				motion = Vector2();
-				break;
+					global_transform.origin -= result.get_travel()
+				velocity = Vector2()
+				last_motion = Vector2()
+				motion = Vector2()
+				break
 			
 			if(result.get_remainder().is_zero_approx()):
-				motion = Vector2();
-				break;
+				motion = Vector2()
+				break
 			
-			# Move on floor only checks.
-			if(floor_block_on_wall && on_wall && motion_slide_up.dot(result.get_normal()) <= 0):
-				# Avoid to move forward on a wall if floor_block_on_wall is true.
-				if(was_on_floor && !on_floor && !vel_dir_facing_up):
-					# If the movement is large the body can be prevented from reaching the walls.
+			if(floor_block_on_wall and on_wall and motion_slide_up.dot(result.get_normal()) <= 0.0):
+				if(was_on_floor and not on_floor and not vel_dir_facing_up):
 					if(result.get_travel().length() <= safe_margin + CMP_EPSILON):
-						# Cancels the motion
-						var gt:Transform2D = get_global_transform();
-						gt = gt.translated(-result.get_travel());
-						set_global_transform(gt);
-					# Determines if you are on ground.
-					_snap_on_floor(true,false,true);
-					velocity = Vector2();
-					last_motion = Vector2();
-					motion = Vector2();
-					break;
-				# Prevents the body from being able to climb a slope when it moves forward against the wall.
-				elif(!on_floor):
-					motion = up_direction * up_direction.dot(result.get_remainder());
-					motion = motion.slide(result.get_normal());
+						global_transform.origin -= result.get_travel()
+					_snap_on_floor(true,false,true)
+					velocity = Vector2()
+					last_motion = Vector2()
+					motion = Vector2()
+					break
+				elif(not on_floor):
+					motion = up_direction * up_direction.dot(result.get_remainder())
+					motion = motion.slide(result.get_normal())
 				else:
-					motion = result.get_remainder();
-			# Constant Speed when the slope is upward.
-			elif(floor_constant_speed && is_on_floor_only() && can_apply_constant_speed && was_on_floor && motion.dot(result.get_normal()) < 0):
-				can_apply_constant_speed = false;
-				var motion_slide_norm:Vector2 = result.get_remainder().slide(result.get_normal()).normalized();
-				motion = motion_slide_norm * (motion_slide_up.length() - result.get_travel().slide(up_direction).length() - last_travel.slide(up_direction).length());
-			# Regular sliding, the last part of the test handle the case when you don't want to slide on the ceiling.
-			elif((sliding_enabled || !on_floor) && (!on_ceiling || slide_on_ceiling || !vel_dir_facing_up) && !apply_ceiling_velocity):
-				var slide_motion:Vector2 = result.get_remainder().slide(result.get_normal());
+					motion = result.get_remainder()
+			elif(floor_constant_speed and is_on_floor_only() and can_apply_constant_speed and was_on_floor and motion.dot(result.get_normal()) < 0.0):
+				can_apply_constant_speed = false
+				var motion_slide_norm:Vector2 = result.get_remainder().slide(result.get_normal()).normalized()
+				motion = motion_slide_norm * (motion_slide_up.length() - result.get_travel().slide(up_direction).length() - last_travel.slide(up_direction).length())
+			elif((sliding_enabled or not on_floor) and (not on_ceiling or slide_on_ceiling or not vel_dir_facing_up) and not apply_ceiling_velocity):
+				var slide_motion:Vector2 = result.get_remainder().slide(result.get_normal())
 				if(slide_motion.dot(velocity) > 0.0):
-					motion = slide_motion;
+					motion = slide_motion
 				else:
-					motion = Vector2();
-				if(slide_on_ceiling):
-					# Apply slide only in the direction of the input motion, otherwise just stop to avoid jittering when moving against a wall.
+					motion = Vector2()
+				
+				if(slide_on_ceiling and on_ceiling):
 					if(vel_dir_facing_up):
-						velocity = velocity.slide(result.get_normal());
+						velocity = velocity.slide(result.get_normal())
 					else:
-						# Avoid acceleration in slope when falling.
-						velocity = up_direction * up_direction.dot(velocity);
-			# No sliding on first attempt to keep floor motion stable when possible.
+						velocity = up_direction * up_direction.dot(velocity)
 			else:
-				motion = result.get_remainder();
-				if(on_ceiling && !slide_on_ceiling && vel_dir_facing_up):
-					velocity = velocity.slide(up_direction);
-					motion = motion.slide(up_direction);
-			last_travel = result.get_travel();
-		# When you move forward in a downward slope you don’t collide because you will be in the air.
-		# This test ensures that constant speed is applied, only if the player is still on the ground after the snap is applied.
-		elif(floor_constant_speed && first_slide && _on_floor_if_snapped(was_on_floor,vel_dir_facing_up)):
-			can_apply_constant_speed = false;
-			sliding_enabled = true;
-			var gt:Transform2D = get_global_transform();
-			gt.origin = previous_position;
-			set_global_transform(gt);
+				motion = result.get_remainder()
+				if(on_ceiling and not slide_on_ceiling and vel_dir_facing_up):
+					velocity = velocity.slide(up_direction)
+					motion = motion.slide(up_direction)
 			
-			var motion_slide_norm:Vector2 = motion.slide(prev_floor_normal).normalized();
-			motion = motion_slide_norm * (motion_slide_up.length());
-			collided = true;
+			last_travel = result.get_travel()
+		elif(floor_constant_speed and first_slide and _on_floor_if_snapped(was_on_floor, vel_dir_facing_up)):
+			can_apply_constant_speed = false
+			sliding_enabled = true
+			global_transform.origin = prev_position
+			
+			var motion_slide_norm:Vector2 = motion.slide(prev_floor_normal).normalized()
+			motion = motion_slide_norm * (motion_slide_up.length())
+			collided = true
 		
-		can_apply_constant_speed = !can_apply_constant_speed && !sliding_enabled;
-		sliding_enabled = true;
-		first_slide = false;
+		can_apply_constant_speed = not can_apply_constant_speed and not sliding_enabled
+		sliding_enabled = true
+		first_slide = false
 		
-		if(!collided || motion.is_zero_approx()): break;
+		if(not collided or motion.is_zero_approx()): break
 	
-	_snap_on_floor(was_on_floor,vel_dir_facing_up,false);
+	_snap_on_floor(was_on_floor,vel_dir_facing_up,false)
 	
-	# Scales the horizontal velocity according to the wall slope.
-	if(is_on_wall_only() && motion_slide_up.dot(motion_results[0].collision_normal) < 0):
-		var slide_motion:Vector2 = velocity.slide(motion_results[0].collision_normal);
-		if(motion_slide_up.dot(slide_motion) < 0):
-			velocity = up_direction * up_direction.dot(velocity);
+	if(is_on_wall_only() and motion_slide_up.dot(motion_results.get(0).get_normal()) < 0.0):
+		var slide_motion:Vector2 = velocity.slide(motion_results.get(0).get_normal())
+		if(motion_slide_up.dot(slide_motion) < 0.0):
+			velocity = up_direction * up_direction.dot(velocity)
 		else:
-			# Keeps the vertical motion from velocity and add the horizontal motion of the projection.
-			velocity = up_direction * up_direction.dot(velocity) + slide_motion.slide(up_direction);
+			velocity = up_direction * up_direction.dot(velocity) + slide_motion.slide(up_direction)
 	
-	# Reset the gravity accumulation when touching the ground.
-	if(on_floor && !vel_dir_facing_up): velocity = velocity.slide(up_direction);
+	if(on_floor and not vel_dir_facing_up): velocity = velocity.slide(up_direction)
 
 func _move_and_slide_floating(delta:float)->void:
-	var motion:Vector2 = velocity * delta;
+	var motion:Vector2 = velocity * delta
 	
-	platform_rid = RID();
-	platform_object_id = -1;
-	floor_normal = Vector2();
-	platform_velocity = Vector2();
+	platform_rid = RID()
+	platform = null
+	floor_normal = Vector2()
+	platform_velocity = Vector2()
 	
-	var first_slide:bool = true;
+	var first_slide:bool = true
 	for i in max_slides:
-		var result:KinematicCollision2D = move_and_collide(motion,false,safe_margin,true);
-		var collided:bool = (result is KinematicCollision2D);
+		var result:KinematicCollision2D = move_and_collide(motion,false,safe_margin,false)
 		
-		last_motion = result.get_travel();
+		last_motion = result.get_travel() if(result)else Vector2()
 		
-		if(collided):
-			motion_results.push_back(result);
-			_set_collision_direction(result);
+		if(result):
+			motion_results.push_back(result)
 			
 			if(result.get_remainder().is_zero_approx()):
-				motion = Vector2();
-				break;
+				motion = Vector2()
+				break
 			
-			if(wall_min_slide_angle != 0 && result.get_normal().angle_to(-velocity.normalized()) < wall_min_slide_angle + FLOOR_ANGLE_THRESHOLD):
-				motion = Vector2();
+			if(wall_min_slide_angle != 0 and result.get_angle(-velocity.normalized()) < wall_min_slide_angle + FLOOR_ANGLE_THRESHOLD):
+				motion = Vector2()
 			elif(first_slide):
-				var motion_slide_norm:Vector2 = result.get_remainder().slide(result.get_normal()).normalized();
-				motion = motion_slide_norm * (motion.length() - result.get_travel().length());
+				var motion_norm:Vector2 = result.get_remainder().slide(result.get_normal()).normalized()
+				motion = motion_norm * (motion.length() - result.get_travel().length())
 			else:
-				motion = result.remainder.slide(result.get_normal());
+				motion = result.get_remainder().slide(result.get_normal())
 			
-			if(!collided || motion.is_zero_approx()):
-				break;
-			
-			first_slide = false;
+			if(motion.dot(velocity) <= 0.0): motion = Vector2()
+		
+		if(not result or motion.is_zero_approx()): break
+		
+		first_slide = false
 
-# Method that avoids the p_wall_as_floor parameter for the public method.
+func apply_floor_snap()->void:
+	_apply_floor_snap(false)
+
 func _apply_floor_snap(wall_as_floor:bool)->void:
-	if(on_floor): return;
+	if(on_floor): return
 	
-	# Snap by at least collision margin to keep floor state consistent.
-	var length:float = max(floor_snap_length,safe_margin);
+	var length:float = max(floor_snap_length,safe_margin)
 	
-	var gt:Transform2D = get_global_transform();
-	var result:KinematicCollision2D = move_and_collide(-up_direction * length,true,safe_margin,true);
-	if(result is KinematicCollision2D):
-		if((result.get_normal().angle_to(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD) ||
-		(wall_as_floor && result.angle_to(-up_direction) > floor_max_angle + FLOOR_ANGLE_THRESHOLD)):
-			on_floor = true;
-			floor_normal = result.get_normal();
-			_set_platform_data(result);
-			var new_travel:Vector2 = result.get_travel();
-			if(floor_stop_on_slope):
-				# move and collide may stray the object a bit because of pre un-stucking,
-				# so only ensure that motion happens on floor direction in this case.
-				if(new_travel.length() > safe_margin):
-					new_travel = up_direction * up_direction.dot(new_travel);
-				else:
-					new_travel = Vector2();
+	var result:KinematicCollision2D = move_and_collide(-up_direction * length,true,safe_margin,true)
+	if(result):
+		if((result.get_angle(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD) or
+				(wall_as_floor and result.get_angle(-up_direction) > floor_max_angle + FLOOR_ANGLE_THRESHOLD)):
+			on_floor = true
+			floor_normal = result.get_normal()
+			_set_platform_data(result)
 			
-			gt = gt.translated(new_travel);
-			set_global_transform(gt);
+			var new_travel = result.get_travel()
+			if(new_travel.length() > safe_margin):
+				new_travel = up_direction * up_direction.dot(result.get_normal())
+			else:
+				new_travel = Vector2()
+			
+			global_transform.origin += new_travel
 
 func _snap_on_floor(was_on_floor:bool,vel_dir_facing_up:bool,wall_as_floor:bool)->void:
-	if(on_floor || !was_on_floor || vel_dir_facing_up): return;
-	_apply_floor_snap(wall_as_floor);
+	if(on_floor or not was_on_floor or vel_dir_facing_up): return
+	
+	_apply_floor_snap(wall_as_floor)
 
 func _on_floor_if_snapped(was_on_floor:bool,vel_dir_facing_up:bool)->bool:
-	if(up_direction == Vector2() || on_floor || !was_on_floor || vel_dir_facing_up): return false;
+	if(up_direction.is_zero_approx() or on_floor or not was_on_floor or vel_dir_facing_up): return false
 	
-	# Snap by at least collision margin to keep floor state consistent.
-	var length:float = max(floor_snap_length, safe_margin);
+	var length:float = max(floor_snap_length,safe_margin)
 	
-	var result:KinematicCollision2D = move_and_collide(-up_direction * length,true,safe_margin,true);
-	if(result is KinematicCollision2D):
+	var result:KinematicCollision2D = move_and_collide(-up_direction * length,true,safe_margin,true)
+	if(result):
 		if(result.get_angle(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD):
-			return true;
+			return true
 	
-	return false;
+	return false
 
 func _set_collision_direction(result:KinematicCollision2D)->void:
-	if(motion_mode == MOTION_MODE_GROUNDED && result.get_angle(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD):
-		on_floor = true;
-		floor_normal = result.get_normal();
-		_set_platform_data(result);
-	elif(motion_mode == MOTION_MODE_GROUNDED && result.get_angle(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD):
-		on_ceiling = true;
+	if(motion_mode == CharacterBody2D.MOTION_MODE_GROUNDED and result.get_angle(up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD):
+		on_floor = true
+		floor_normal = result.get_normal()
+		_set_platform_data(result)
+	elif(motion_mode == CharacterBody2D.MOTION_MODE_GROUNDED and result.get_angle(-up_direction) <= floor_max_angle + FLOOR_ANGLE_THRESHOLD):
+		on_ceiling = true
 	else:
-		on_wall = true;
-		wall_normal = result.get_normal();
-		# Don't apply wall velocity when the collider is a CharacterBody2D.
-		if(result.get_collider() is CharacterBody2D):
-			_set_platform_data(result);
+		on_wall = true
+		wall_normal = result.get_normal()
+		if(not (result.get_collider() is CharacterBody2D)):
+			_set_platform_data(result)
 
 func _set_platform_data(result:KinematicCollision2D)->void:
-	platform_rid = result.get_collider_rid();
-	platform_object_id = result.get_collider_id();
-	platform_velocity = result.get_collider_velocity();
-	platform_layer = PhysicsServer2D.body_get_collision_layer(platform_rid);
+	var bs:PhysicsDirectBodyState2D = PhysicsServer2D.body_get_direct_state(result.get_collider_rid())
+	if(not bs): return
+	
+	platform_rid = result.get_collider_rid()
+	platform = result.get_collider()
+	platform_velocity = result.get_collider_velocity()
+	platform_layer = bs.collision_layer
 
-func is_on_floor()->bool: return on_floor;
-func is_on_floor_only()->bool: return on_floor && !on_wall && !on_ceiling;
-func is_on_wall()->bool: return on_wall;
-func is_on_wall_only()->bool: return on_wall && !on_floor && !on_ceiling;
-func is_on_ceiling()->bool: return on_ceiling;
-func is_on_ceiling_only()->bool: return on_ceiling && !on_floor && !on_wall;
+# Get & Set Data
+# NOTE: I didn't have to port these, but I chose to.
 
-func get_floor_normal()->Vector2: return floor_normal;
-func get_wall_normal()->Vector2: return wall_normal;
+func get_velocity()->Vector2: return velocity
+func set_velocity(new:Vector2)->void: velocity = new
 
-func get_last_motion()->Vector2: return last_motion;
-func get_position_delta()->Vector2: return get_global_transform().origin - previous_position;
+func is_on_floor()->bool: return on_floor
+func is_on_floor_only()->bool: return on_floor and not on_wall and not on_ceiling
+func is_on_wall()->bool: return on_wall
+func is_on_wall_only()->bool: return on_wall and not on_floor and not on_ceiling
+func is_on_ceiling()->bool: return on_ceiling
+func is_on_ceiling_only()->bool: return on_ceiling and not on_floor and not on_wall
 
-func get_real_velocity()->Vector2: return real_velocity;
-func get_platform_velocity()->Vector2: return platform_velocity;
+func get_floor_normal()->Vector2: return floor_normal
+func get_wall_normal()->Vector2: return wall_normal
 
-func get_slide_collision_count()->int: return motion_results.size();
-func get_slide_collision(bounce:int)->KinematicCollision2D: return motion_results[bounce];
-func get_last_slide_collision()->KinematicCollision2D:
-	if(motion_results.size() == 0): return KinematicCollision2D.new();
-	return get_slide_collision(motion_results.size() - 1);
+func get_last_motion()->Vector2: return last_motion
 
-func get_safe_margin()->float: return safe_margin;
-func set_safe_margin(margin:float)->void: safe_margin = margin;
+func get_position_delta()->Vector2: return get_global_transform().get_origin() - previous_position
 
-func is_floor_stop_on_slope_enabled()->bool: return floor_stop_on_slope;
-func set_floor_stop_on_slope_enabled(enabled:bool)->void: floor_stop_on_slope = enabled;
+func get_real_velocity()->Vector2: return real_velocity
 
-func is_floor_block_on_wall_enabled()->bool: return floor_block_on_wall;
-func set_floor_block_on_wall_enabled(enabled:bool)->void: floor_block_on_wall = enabled;
+func get_floor_angle(p_up_direction:Vector2)->float: 
+	assert(not p_up_direction.is_zero_approx())
+	return acos(floor_normal.dot(p_up_direction))
 
-func is_sliding_on_ceiling_enabled()->bool: return slide_on_ceiling;
-func set_sliding_on_ceiling_enabled(enabled:bool)->void: slide_on_ceiling = enabled;
+func get_platform_velocity()->Vector2: return platform_velocity
 
-func get_platform_floor_layers()->int: return platform_floor_layers;
-func set_platform_floor_layers(exclude_layers:int)->void: platform_floor_layers = exclude_layers;
+func get_slide_collision_count()->int: return motion_results.size()
 
-func get_platform_wall_layers()->int: return platform_wall_layers;
-func set_platform_wall_layers(exclude_layers:int)->void: platform_wall_layers = exclude_layers;
+func get_slide_collision(bounce:int)->KinematicCollision2D: 
+	assert(bounce >= 0 and bounce < motion_results.size())
+	return motion_results[bounce]
 
-func get_motion_mode()->int: return motion_mode;
-func set_motion_mode(mode:MotionMode)->void: motion_mode = mode;
+func _get_last_slide_collision()->KinematicCollision2D: 
+	if(motion_results.is_empty()): return KinematicCollision2D.new()
+	return motion_results[motion_results.size()-1]
 
-func get_platform_on_leave()->int: return platform_on_leave;
-func set_platform_on_leave(on_leave_apply_velocity:PlatformOnLeave)->void: platform_on_leave = on_leave_apply_velocity;
+func set_safe_margin(margin:float)->void: safe_margin = margin
+func get_safe_margin()->float: return safe_margin
 
-func get_max_slides()->int: return max_slides;
-func set_max_slides(max_slides:int)->void: self.max_slides = max(max_slides,1);
+func is_floor_stop_on_slope_enabled()->bool: return floor_stop_on_slope
+func set_floor_stop_on_slope_enabled(enabled:bool)->void: floor_stop_on_slope = enabled
 
-func get_floor_max_angle()->float: return floor_max_angle;
-func set_floor_max_angle(radians:float)->void: floor_max_angle = radians;
+func is_floor_constant_speed_enabled()->bool: return floor_constant_speed
+func set_floor_constant_speed_enabled(enabled:bool)->void: floor_constant_speed = enabled
 
-func get_floor_snap_length()->float: return floor_snap_length;
-func set_floor_snap_length(snap_length:float)->void: floor_snap_length = snap_length;
+func is_floor_block_on_wall_enabled()->bool: return floor_block_on_wall
+func set_floor_block_on_wall_enabled(enabled:bool)->void: floor_block_on_wall = enabled
 
-func get_wall_min_slide_angle()->float: return wall_min_slide_angle;
-func set_wall_min_slide_angle(radians:float)->void: wall_min_slide_angle = radians;
+func is_slide_on_ceiling_enabled()->bool: return slide_on_ceiling
+func set_slide_on_ceiling_enabled(enabled:bool)->void: slide_on_ceiling = enabled
 
-func get_up_direction()->Vector2: return up_direction;
-func set_up_direction(direction:Vector2)->void: up_direction = direction;
+func get_platform_floor_layer()->int: return platform_floor_layers
+func set_platform_floor_layers(excluded_layers:int)->void: platform_floor_layers = excluded_layers
+
+func get_platform_wall_layer()->int: return platform_wall_layers
+func set_platform_wall_layers(excluded_layers:int)->void: platform_wall_layers = excluded_layers
+
+func set_motion_mode(mode:CharacterBody2D.MotionMode)->void: motion_mode = mode
+func get_motion_mode()->CharacterBody2D.MotionMode: return motion_mode
+
+func set_platform_on_leave(on_leave:CharacterBody2D.PlatformOnLeave)->void: platform_on_leave = on_leave
+func get_platform_on_leave()->CharacterBody2D.PlatformOnLeave: return platform_on_leave
+
+func get_max_slides()->int: return max_slides
+func set_max_slides(p_max_slides:int)->void:
+	assert(p_max_slides > 0)
+	max_slides = p_max_slides
+
+func get_floor_max_angle()->float: return floor_max_angle
+func set_floor_max_angle(radians:float)->void: floor_max_angle = radians
+
+func get_floor_snap_length()->float: return floor_snap_length
+func set_floor_snap_length(length:float)->void: 
+	assert(floor_snap_length >= 0.0)
+	floor_snap_length = length
+
+func get_wall_min_slide_angle()->float: return wall_min_slide_angle
+func set_wall_min_slide_angle(radians:float)->void: wall_min_slide_angle = radians
+
+func get_up_direction()->Vector2: return up_direction
+func set_up_direction(p_up_direction:Vector2)->void:
+	assert(not p_up_direction.is_zero_approx())
+	up_direction = p_up_direction
+
+## Internally the move_and_collide function is always called from gdscript without "cancel sliding", and there is no way to enable this behavior, other than this.
+func _move_and_collide_cancel_sliding(motion:Vector2,test_only:bool,margin:float,recovery_as_collision:bool,cancel_sliding:bool)->KinematicCollision2D:
+	var params:PhysicsTestMotionParameters2D = PhysicsTestMotionParameters2D.new()
+	params.from = global_transform
+	params.motion = motion
+	params.margin = safe_margin
+	params.recovery_as_collision = recovery_as_collision
+	var result:PhysicsTestMotionResult2D = PhysicsTestMotionResult2D.new()
+	var colliding:bool = PhysicsServer2D.body_test_motion(get_rid(),params,result)
+	
+	var true_travel:Vector2 = result.get_travel()
+	# unused, since you can't set the travel and remainder via gdscript.
+	#var true_remainder:Vector2 = result.get_remainder()
+	if(cancel_sliding):
+		var motion_length:float = motion.length()
+		var precision:float = 0.001
+		
+		if(colliding):
+			precision += motion_length * (result.get_collision_unsafe_fraction() - result.get_collision_safe_fraction())
+			
+			if(result.get_collision_depth() > margin + precision): cancel_sliding = false
+		
+		if(cancel_sliding):
+			var motion_normal:Vector2
+			if(motion_length > 0.001): motion_normal = motion.normalized()
+			
+			var projected_length:float = result.get_travel().dot(motion_normal)
+			var recovery:Vector2 = result.get_travel() - motion_normal * projected_length
+			var recovery_length:float = recovery.length()
+			
+			if(recovery_length < margin + precision):
+				true_travel = motion_normal * projected_length
+				#true_remainder = motion - true_travel
+	var new_result = null
+	
+	if(colliding): # Hack since we can't add PhysicsTestMotionResult2D to our own KinematicCollision2D (I believe this is an oversight)
+		new_result = move_and_collide(motion,true,margin,recovery_as_collision)
+	
+	if(not test_only):
+		global_transform.origin += true_travel
+	
+	return new_result if(colliding)else null
